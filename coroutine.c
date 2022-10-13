@@ -5,41 +5,47 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdint.h>
-
+#include <pthread.h>
 #if __APPLE__ && __MACH__
-	#include <sys/ucontext.h>
-#else 
-	#include <ucontext.h>
-#endif 
+#include <sys/ucontext.h>
+#else
+#include <ucontext.h>
+#endif
 
-#define STACK_SIZE (1024*1024)
-#define DEFAULT_COROUTINE 16
-
+#define STACK_SIZE (1024 * 1024)
+#define DEFAULT_COROUTINE 1024
+#define DEFAULT_POLL_SIZE 8
+// 协程
 struct coroutine;
-
-struct schedule {
+// 协程切换机
+struct cswitcher
+{
 	char stack[STACK_SIZE];
 	ucontext_t main;
 	int nco;
 	int cap;
 	int running;
 	struct coroutine **co;
+	// Thread poll
+	pthread_t ppools[DEFAULT_POLL_SIZE];
 };
 
-struct coroutine {
+struct coroutine
+{
 	coroutine_func func;
 	void *ud;
 	ucontext_t ctx;
-	struct schedule * sch;
+	struct cswitcher *sch;
 	ptrdiff_t cap;
 	ptrdiff_t size;
 	int status;
 	char *stack;
 };
 
-struct coroutine * 
-_co_new(struct schedule *S , coroutine_func func, void *ud) {
-	struct coroutine * co = malloc(sizeof(*co));
+struct coroutine *
+_co_new(struct cswitcher *S, coroutine_func func, void *ud)
+{
+	struct coroutine *co = malloc(sizeof(*co));
 	co->func = func;
 	co->ud = ud;
 	co->sch = S;
@@ -50,15 +56,16 @@ _co_new(struct schedule *S , coroutine_func func, void *ud) {
 	return co;
 }
 
-void
-_co_delete(struct coroutine *co) {
+void _co_delete(struct coroutine *co)
+{
 	free(co->stack);
 	free(co);
 }
 
-struct schedule * 
-coroutine_open(void) {
-	struct schedule *S = malloc(sizeof(*S));
+struct cswitcher *
+coroutine_open(void)
+{
+	struct cswitcher *S = malloc(sizeof(*S));
 	S->nco = 0;
 	S->cap = DEFAULT_COROUTINE;
 	S->running = -1;
@@ -67,12 +74,14 @@ coroutine_open(void) {
 	return S;
 }
 
-void 
-coroutine_close(struct schedule *S) {
+void coroutine_close(struct cswitcher *S)
+{
 	int i;
-	for (i=0;i<S->cap;i++) {
-		struct coroutine * co = S->co[i];
-		if (co) {
+	for (i = 0; i < S->cap; i++)
+	{
+		struct coroutine *co = S->co[i];
+		if (co)
+		{
 			_co_delete(co);
 		}
 	}
@@ -81,22 +90,27 @@ coroutine_close(struct schedule *S) {
 	free(S);
 }
 
-int 
-coroutine_new(struct schedule *S, coroutine_func func, void *ud) {
-	struct coroutine *co = _co_new(S, func , ud);
-	if (S->nco >= S->cap) {
+int coroutine_new(struct cswitcher *S, coroutine_func func, void *ud)
+{
+	struct coroutine *co = _co_new(S, func, ud);
+	if (S->nco >= S->cap)
+	{
 		int id = S->cap;
 		S->co = realloc(S->co, S->cap * 2 * sizeof(struct coroutine *));
-		memset(S->co + S->cap , 0 , sizeof(struct coroutine *) * S->cap);
+		memset(S->co + S->cap, 0, sizeof(struct coroutine *) * S->cap);
 		S->co[S->cap] = co;
 		S->cap *= 2;
 		++S->nco;
 		return id;
-	} else {
+	}
+	else
+	{
 		int i;
-		for (i=0;i<S->cap;i++) {
-			int id = (i+S->nco) % S->cap;
-			if (S->co[id] == NULL) {
+		for (i = 0; i < S->cap; i++)
+		{
+			int id = (i + S->nco) % S->cap;
+			if (S->co[id] == NULL)
+			{
 				S->co[id] = co;
 				++S->nco;
 				return id;
@@ -108,27 +122,29 @@ coroutine_new(struct schedule *S, coroutine_func func, void *ud) {
 }
 
 static void
-mainfunc(uint32_t low32, uint32_t hi32) {
+mainfunc(uint32_t low32, uint32_t hi32)
+{
 	uintptr_t ptr = (uintptr_t)low32 | ((uintptr_t)hi32 << 32);
-	struct schedule *S = (struct schedule *)ptr;
+	struct cswitcher *S = (struct cswitcher *)ptr;
 	int id = S->running;
 	struct coroutine *C = S->co[id];
-	C->func(S,C->ud);
+	C->func(S, C->ud);
 	_co_delete(C);
 	S->co[id] = NULL;
 	--S->nco;
 	S->running = -1;
 }
 
-void 
-coroutine_resume(struct schedule * S, int id) {
+void coroutine_resume(struct cswitcher *S, int id)
+{
 	assert(S->running == -1);
-	assert(id >=0 && id < S->cap);
+	assert(id >= 0 && id < S->cap);
 	struct coroutine *C = S->co[id];
 	if (C == NULL)
 		return;
 	int status = C->status;
-	switch(status) {
+	switch (status)
+	{
 	case COROUTINE_READY:
 		getcontext(&C->ctx);
 		C->ctx.uc_stack.ss_sp = S->stack;
@@ -137,7 +153,7 @@ coroutine_resume(struct schedule * S, int id) {
 		S->running = id;
 		C->status = COROUTINE_RUNNING;
 		uintptr_t ptr = (uintptr_t)S;
-		makecontext(&C->ctx, (void (*)(void)) mainfunc, 2, (uint32_t)ptr, (uint32_t)(ptr>>32));
+		makecontext(&C->ctx, (void (*)(void))mainfunc, 2, (uint32_t)ptr, (uint32_t)(ptr >> 32));
 		swapcontext(&S->main, &C->ctx);
 		break;
 	case COROUTINE_SUSPEND:
@@ -152,41 +168,43 @@ coroutine_resume(struct schedule * S, int id) {
 }
 
 static void
-_save_stack(struct coroutine *C, char *top) {
+_save_stack(struct coroutine *C, char *top)
+{
 	char dummy = 0;
 	assert(top - &dummy <= STACK_SIZE);
-	if (C->cap < top - &dummy) {
+	if (C->cap < top - &dummy)
+	{
 		free(C->stack);
-		C->cap = top-&dummy;
+		C->cap = top - &dummy;
 		C->stack = malloc(C->cap);
 	}
 	C->size = top - &dummy;
 	memcpy(C->stack, &dummy, C->size);
 }
 
-void
-coroutine_yield(struct schedule * S) {
+void coroutine_yield(struct cswitcher *S)
+{
 	int id = S->running;
 	assert(id >= 0);
-	struct coroutine * C = S->co[id];
+	struct coroutine *C = S->co[id];
 	assert((char *)&C > S->stack);
-	_save_stack(C,S->stack + STACK_SIZE);
+	_save_stack(C, S->stack + STACK_SIZE);
 	C->status = COROUTINE_SUSPEND;
 	S->running = -1;
-	swapcontext(&C->ctx , &S->main);
+	swapcontext(&C->ctx, &S->main);
 }
 
-int 
-coroutine_status(struct schedule * S, int id) {
-	assert(id>=0 && id < S->cap);
-	if (S->co[id] == NULL) {
+int coroutine_status(struct cswitcher *S, int id)
+{
+	assert(id >= 0 && id < S->cap);
+	if (S->co[id] == NULL)
+	{
 		return COROUTINE_DEAD;
 	}
 	return S->co[id]->status;
 }
 
-int 
-coroutine_running(struct schedule * S) {
+int coroutine_running(struct cswitcher *S)
+{
 	return S->running;
 }
-

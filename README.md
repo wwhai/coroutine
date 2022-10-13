@@ -1,13 +1,10 @@
-It's an asymmetric coroutine library (like lua).
+# 用户级进程实现
+## 说明
+核心代码来自于云风大佬的仓库，直接原封不动拿过来，然后又加了一些东西。
 
-You can use coroutine_open to open a schedule first, and then create coroutine in that schedule. 
+## 更改
+1. 私以为云风大佬仅仅实现了切换任务，而没有实现真正的调度，所以其代码严格来说不是个调度器；因此我把之前的名字给改了，改成了：cswitcher, 仅仅用来切换任务用; 而调度器则是重新加上的新功能。
+2. 引入了线程，但是该线程是用来配合调度使用而非工作线程。
 
-You should call coroutine_resume in the thread that you call coroutine_open, and you can't call it in a coroutine in the same schedule.
-
-Coroutines in the same schedule share the stack , so you can create many coroutines without worry about memory.
-
-But switching context will copy the stack the coroutine used.
-
-Read source for detail.
-
-Chinese blog : http://blog.codingnow.com/2012/07/c_coroutine.html
+## 架构
+![1665649213556](image/README/1665649213556.png)
